@@ -35,6 +35,9 @@ interface PreflightDeps {
   exec: (cmd: string) => Promise<string>;
   configStore: ConfigStore;
   getDaemonStatus: () => Promise<DaemonStatus>;
+  /** A start reservation whose process isn't positively gone, with the endpoint its child was launched at (a start that
+   *  ended pending leaves that child listening there). Absent = an occupied port always refuses, as before. */
+  pendingStart?: () => { pid?: number; host?: string; port?: number } | undefined;
   openrigHome?: string;
   riggedHome?: string;
 }
@@ -193,13 +196,19 @@ export class SystemPreflight {
       } else if (available === "available") {
         checks.push({ name: "port_available", ok: true });
       } else {
-        checks.push({
-          name: "port_available",
-          ok: false,
-          error: `Port ${effectivePort} is already in use on ${effectiveHost}.`,
-          reason: "The daemon cannot bind to a port that is already occupied.",
-          fix: `Run rig config set daemon.port ${effectivePort + 1} and retry, or find the existing process with lsof -nP -iTCP:${effectivePort} -sTCP:LISTEN.`,
-        });
+        // A start that ended pending leaves its child listening, and the next start finishes that start at the launch's own
+        // endpoint: it checks the child against the reservation first, and while the reservation stands it starts no other
+        // daemon, so the port a new launch would take can't block that finish. The finish says what it is waiting for, so
+        // this check adds no text of its own.
+        checks.push(this.pendingStartStands()
+          ? { name: "port_available", ok: true }
+          : {
+            name: "port_available",
+            ok: false,
+            error: `Port ${effectivePort} is already in use on ${effectiveHost}.`,
+            reason: "The daemon cannot bind to a port that is already occupied.",
+            fix: `Run rig config set daemon.port ${effectivePort + 1} and retry, or find the existing process with lsof -nP -iTCP:${effectivePort} -sTCP:LISTEN.`,
+          });
       }
     }
 
@@ -207,5 +216,10 @@ export class SystemPreflight {
       ready: checks.every((c) => c.ok),
       checks,
     };
+  }
+
+  /** Whether a start reservation naming a process that isn't positively gone stands, as the start reads it. */
+  private pendingStartStands(): boolean {
+    try { return this.deps.pendingStart?.()?.pid !== undefined; } catch { return false; }
   }
 }
